@@ -1,0 +1,102 @@
+name: Publish obscura image
+
+# Builds a stealth-enabled obscura image from the upstream release binary and
+# pushes it to GHCR.
+#
+# GitHub Actions cannot subscribe to another repository's release event, so
+# "on obscura release" is implemented by polling the upstream latest release on
+# a daily schedule and building it when it is not already published. Use the
+# manual trigger to build a specific version on demand.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream obscura release tag (e.g. v0.1.8). Blank = latest upstream release."
+        required: false
+        type: string
+      force:
+        description: "Rebuild and overwrite even if the version tag already exists in GHCR."
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    # Daily: pick up new upstream obscura releases within ~24h.
+    - cron: "17 4 * * *"
+
+concurrency:
+  group: publish-obscura
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  UPSTREAM_REPO: h4ckf0r0day/obscura
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and image
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION:-}"
+          if [ -z "$version" ]; then
+            version="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
+          fi
+          image="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/obscura"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Resolved: ${image}:${version}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if already published
+        id: exists
+        run: |
+          set +e
+          docker manifest inspect "${{ steps.resolve.outputs.image }}:${{ steps.resolve.outputs.version }}" > /dev/null 2>&1
+          found=$?
+          set -e
+          if [ "$found" -eq 0 ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.resolve.outputs.image }}:${{ steps.resolve.outputs.version }} already published — skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        if: steps.exists.outputs.skip == 'false'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        if: steps.exists.outputs.skip == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        if: steps.exists.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          build-args: |
+            OBSCURA_VERSION=${{ steps.resolve.outputs.version }}
+          tags: |
+            ${{ steps.resolve.outputs.image }}:${{ steps.resolve.outputs.version }}
+            ${{ steps.resolve.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
