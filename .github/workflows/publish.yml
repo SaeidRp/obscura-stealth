@@ -3,11 +3,25 @@ name: Publish obscura image
 # Builds a stealth-enabled obscura image from the upstream release binary and
 # pushes it to GHCR.
 #
-# GitHub Actions cannot subscribe to another repository's release event, so
-# "on obscura release" is implemented by polling the upstream latest release on
-# a daily schedule and building it when it is not already published. Use the
-# manual trigger to build a specific version on demand.
+# Three triggers:
+#   - push:     a change to the image's own code (Dockerfile / sidecar / build
+#               context) must republish, even if the upstream version is
+#               unchanged — the image bundles our sidecar, so the same upstream
+#               version can produce a new image.
+#   - schedule: GitHub Actions cannot subscribe to another repo's release event,
+#               so "on obscura release" is a daily poll of the upstream latest
+#               release, building it only when not already published.
+#   - dispatch: build a specific version on demand.
 on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "go.mod"
+      - "go.sum"
+      - "sidecar/**"
+      - ".github/workflows/publish.yml"
   workflow_dispatch:
     inputs:
       version:
@@ -65,14 +79,21 @@ jobs:
 
       - name: Check if already published
         id: exists
+        env:
+          EVENT: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
         run: |
           set +e
           docker manifest inspect "${{ steps.resolve.outputs.image }}:${{ steps.resolve.outputs.version }}" > /dev/null 2>&1
           found=$?
           set -e
-          if [ "$found" -eq 0 ] && [ "${{ inputs.force }}" != "true" ]; then
+          # The "already published" shortcut applies ONLY to the scheduled poll,
+          # whose job is to catch *new upstream versions*. A push (image code
+          # changed) or a manual force must always rebuild and overwrite the
+          # version + :latest tags — same upstream version, different image.
+          if [ "$found" -eq 0 ] && [ "$EVENT" != "push" ] && [ "$FORCE" != "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::${{ steps.resolve.outputs.image }}:${{ steps.resolve.outputs.version }} already published — skipping."
+            echo "::notice::${{ steps.resolve.outputs.image }}:${{ steps.resolve.outputs.version }} already published — skipping (scheduled poll, no upstream change)."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
