@@ -1,20 +1,17 @@
 # syntax=docker/dockerfile:1
 
-# Obscura headless-browser image for the Akamai-interstitial fallback.
+# Obscura image for the Akamai-interstitial fallback.
 #
-# It downloads the prebuilt, STEALTH-enabled release binary from upstream rather
-# than compiling from source. Two reasons:
-#   1. Build speed: the from-source build compiles Rust + V8 + BoringSSL
-#      (~20 min). Downloading the release tarball is a few seconds.
-#   2. Stealth: the published `h4ckf0r0day/obscura` Docker Hub image is built
-#      WITHOUT `--features stealth` (no TLS impersonation) and cannot clear
-#      Akamai. The GitHub *release* tarball is built with stealth, so `--stealth`
-#      actually impersonates a browser TLS fingerprint.
+# Ships the prebuilt STEALTH-enabled obscura release binary plus a small HTTP
+# sidecar. The sidecar turns `POST /fetch {url, proxy, ...}` into a one-shot
+# `obscura fetch --proxy <proxy> --stealth` invocation — the only way obscura
+# supports a PER-REQUEST proxy (serve/CDP can only pin one proxy at startup).
+# See README for the rationale.
 ARG OBSCURA_VERSION=v0.1.8
 
-FROM debian:bookworm-slim AS fetch
+# --- download the upstream stealth release binary --------------------------
+FROM debian:bookworm-slim AS obscura
 ARG OBSCURA_VERSION
-# TARGETARCH is provided by BuildKit (amd64 / arm64).
 ARG TARGETARCH
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
@@ -30,14 +27,23 @@ RUN set -eux; \
     mkdir -p /out; \
     tar -xzf /tmp/obscura.tar.gz -C /out obscura obscura-worker; \
     chmod +x /out/obscura /out/obscura-worker; \
-    # Fail the build early if the binary can't run (e.g. glibc/snapshot mismatch).
     # `--version` does not init V8, so it is safe under QEMU cross-build.
     /out/obscura --version
 
-# distroless/cc: glibc + libgcc + CA certs only — matches obscura's own runtime.
+# --- build the Go sidecar (cross-compiled, static) -------------------------
+FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS sidecar
+ARG TARGETARCH
+WORKDIR /src
+COPY go.mod ./
+COPY sidecar ./sidecar
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -o /out/obscura-sidecar ./sidecar
+
+# --- runtime ---------------------------------------------------------------
+# distroless/cc: glibc + libgcc + CA certs (obscura needs glibc; the sidecar is
+# static). Default user is root so /tmp storage dirs are writable.
 FROM gcr.io/distroless/cc-debian12
-COPY --from=fetch /out/obscura /usr/local/bin/obscura
-COPY --from=fetch /out/obscura-worker /usr/local/bin/obscura-worker
+COPY --from=obscura /out/obscura /usr/local/bin/obscura
+COPY --from=obscura /out/obscura-worker /usr/local/bin/obscura-worker
+COPY --from=sidecar /out/obscura-sidecar /usr/local/bin/obscura-sidecar
 EXPOSE 9222
-ENTRYPOINT ["/usr/local/bin/obscura"]
-CMD ["serve", "--port", "9222", "--host", "0.0.0.0"]
+ENTRYPOINT ["/usr/local/bin/obscura-sidecar"]
