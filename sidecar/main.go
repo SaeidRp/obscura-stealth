@@ -19,10 +19,26 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 )
 
-const obscuraBin = "/usr/local/bin/obscura"
+const (
+	obscuraBin = "/usr/local/bin/obscura"
+
+	// Hard ceilings so a caller can't request an unbounded navigation that pins
+	// a browser (and a concurrency slot) indefinitely.
+	maxTimeoutSeconds = 120
+	maxWaitSeconds    = 30
+	// Grace between the SIGKILL of a timed-out fetch and giving up on Wait, so
+	// orphaned pipe holders can't keep the call hanging.
+	killGrace = 5 * time.Second
+)
+
+// fetchSem bounds how many `obscura fetch` browsers run at once. Each is a full
+// headless browser, so unbounded concurrency is what previously wedged the
+// container. Excess requests get a fast 503 and the caller retries.
+var fetchSem chan struct{}
 
 // fetchRequest is the JSON body accepted by POST /fetch.
 type fetchRequest struct {
@@ -47,6 +63,12 @@ type fetchResponse struct {
 }
 
 func main() {
+	maxConc := getenvInt("SIDECAR_MAX_CONCURRENCY", 3)
+	if maxConc < 1 {
+		maxConc = 1
+	}
+	fetchSem = make(chan struct{}, maxConc)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -55,6 +77,7 @@ func main() {
 	mux.HandleFunc("/fetch", handleFetch)
 
 	port := getenv("SIDECAR_PORT", "9222")
+	log.Printf("obscura-sidecar max concurrency: %d", maxConc)
 	srv := &http.Server{
 		Addr:        ":" + port,
 		Handler:     mux,
@@ -78,6 +101,20 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.URL == "" {
 		writeJSON(w, http.StatusBadRequest, fetchResponse{Error: "url is required"})
+		return
+	}
+
+	// Acquire a concurrency slot. If all browsers are busy, fail fast with a 503
+	// (transient) instead of queueing unboundedly — the caller retries.
+	acquireTimeout := time.Duration(getenvInt("SIDECAR_ACQUIRE_TIMEOUT", 8)) * time.Second
+	select {
+	case fetchSem <- struct{}{}:
+		defer func() { <-fetchSem }()
+	case <-time.After(acquireTimeout):
+		writeJSON(w, http.StatusServiceUnavailable, fetchResponse{Error: "sidecar busy: max concurrency reached"})
+		return
+	case <-r.Context().Done():
+		writeJSON(w, http.StatusServiceUnavailable, fetchResponse{Error: "client canceled before acquiring slot"})
 		return
 	}
 
@@ -109,13 +146,22 @@ func runFetch(ctx context.Context, req fetchRequest) (string, []json.RawMessage,
 	if timeout <= 0 {
 		timeout = 60
 	}
+	if timeout > maxTimeoutSeconds {
+		timeout = maxTimeoutSeconds
+	}
 	wait := req.Wait
 	if wait < 0 {
 		wait = 0
 	}
+	if wait > maxWaitSeconds {
+		wait = maxWaitSeconds
+	}
 	waitUntil := req.WaitUntil
 	if waitUntil == "" {
-		waitUntil = "networkidle0"
+		// obscura's own default. "networkidle0" can hang indefinitely on heavy
+		// SPAs (ad/analytics keep the network busy); "load" still has the
+		// initial HTML + __NEXT_DATA__ that callers parse.
+		waitUntil = "load"
 	}
 	// "html" (default) for pages; "text" returns the raw document body, which is
 	// what JSON API endpoints need (no <html> wrapper, no entity-encoding).
@@ -145,7 +191,20 @@ func runFetch(ctx context.Context, req fetchRequest) (string, []json.RawMessage,
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, obscuraBin, args...)
-	cmd.Env = append(os.Environ(), buildEnv(req)...)
+	cmd.Env = append(os.Environ(), buildEnv(req, timeout)...)
+
+	// Run obscura in its own process group and SIGKILL the WHOLE group on
+	// timeout. obscura spawns browser child processes; the default ctx kill only
+	// reaps the parent, leaving orphans that previously wedged the container.
+	// WaitDelay bounds Wait() if an orphan keeps the output pipes open.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = killGrace
 
 	var stdout, stderr capBuffer
 	stdout.limit = 32 << 20 // 32 MiB ceiling on page HTML
@@ -154,6 +213,9 @@ func runFetch(ctx context.Context, req fetchRequest) (string, []json.RawMessage,
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if cmdCtx.Err() == context.DeadlineExceeded {
+			return "", nil, errors.New("obscura fetch timed out after " + strconv.Itoa(timeout+wait+30) + "s (killed)")
+		}
 		msg := stderr.String()
 		if msg == "" {
 			msg = err.Error()
@@ -167,9 +229,15 @@ func runFetch(ctx context.Context, req fetchRequest) (string, []json.RawMessage,
 }
 
 // buildEnv maps per-request stealth knobs to obscura's process env so the
-// presented identity (timezone/geolocation) can match the proxy's region.
-func buildEnv(req fetchRequest) []string {
-	var env []string
+// presented identity (timezone/geolocation) can match the proxy's region, and
+// aligns obscura's own navigation/fetch deadlines with our --timeout so it
+// self-aborts before the sidecar's hard process-group kill.
+func buildEnv(req fetchRequest, timeout int) []string {
+	timeoutMs := strconv.Itoa(timeout * 1000)
+	env := []string{
+		"OBSCURA_NAV_TIMEOUT_MS=" + timeoutMs,
+		"OBSCURA_FETCH_TIMEOUT_MS=" + timeoutMs,
+	}
 	if req.Timezone != "" {
 		env = append(env, "OBSCURA_TIMEZONE="+req.Timezone)
 	}
@@ -208,6 +276,15 @@ func writeJSON(w http.ResponseWriter, status int, body fetchResponse) {
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func getenvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return fallback
 }
