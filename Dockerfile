@@ -31,7 +31,7 @@ RUN set -eux; \
     /out/obscura --version
 
 # --- build the Go sidecar (cross-compiled, static) -------------------------
-FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS sidecar
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS sidecar
 ARG TARGETARCH
 WORKDIR /src
 COPY go.mod ./
