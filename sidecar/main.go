@@ -30,6 +30,7 @@ type fetchRequest struct {
 	Proxy       string            `json:"proxy"`
 	UserAgent   string            `json:"user_agent"`
 	WaitUntil   string            `json:"wait_until"`
+	Dump        string            `json:"dump"`        // "html" (default) or "text" (raw body, e.g. JSON APIs)
 	Timeout     int               `json:"timeout"`     // obscura nav timeout (seconds)
 	Wait        int               `json:"wait"`        // extra settle wait (seconds)
 	Timezone    string            `json:"timezone"`    // OBSCURA_TIMEZONE for this request
@@ -116,11 +117,17 @@ func runFetch(ctx context.Context, req fetchRequest) (string, []json.RawMessage,
 	if waitUntil == "" {
 		waitUntil = "networkidle0"
 	}
+	// "html" (default) for pages; "text" returns the raw document body, which is
+	// what JSON API endpoints need (no <html> wrapper, no entity-encoding).
+	dump := req.Dump
+	if dump != "text" {
+		dump = "html"
+	}
 
 	args := []string{
 		"fetch", req.URL,
 		"--stealth",
-		"--dump", "html",
+		"--dump", dump,
 		"--storage-dir", storageDir,
 		"--wait-until", waitUntil,
 		"--timeout", strconv.Itoa(timeout),
