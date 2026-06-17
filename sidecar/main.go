@@ -30,6 +30,14 @@ const (
 	// a browser (and a concurrency slot) indefinitely.
 	maxTimeoutSeconds = 120
 	maxWaitSeconds    = 30
+
+	// Default post-load settle (seconds) applied when a request omits `wait`.
+	// JS-driven interstitials (e.g. Akamai's triggerInterstitialChallenge() ->
+	// POST /_sec/verify -> location.replace() to the clean URL) clear shortly
+	// after "load" fires; without a settle we can capture mid-challenge and
+	// return the interstitial (or trip the redirect limit). Tunable via
+	// SIDECAR_DEFAULT_WAIT (set 0 to disable).
+	defaultSettleWaitSeconds = 3
 	// Grace between the SIGKILL of a timed-out fetch and giving up on Wait, so
 	// orphaned pipe holders can't keep the call hanging.
 	killGrace = 5 * time.Second
@@ -149,7 +157,12 @@ func runFetch(ctx context.Context, req fetchRequest) (string, []json.RawMessage,
 	if timeout > maxTimeoutSeconds {
 		timeout = maxTimeoutSeconds
 	}
+	// A request that omits `wait` (the backend does) gets the default settle so
+	// JS-driven interstitials finish before we capture; a caller may override.
 	wait := req.Wait
+	if wait <= 0 {
+		wait = getenvInt("SIDECAR_DEFAULT_WAIT", defaultSettleWaitSeconds)
+	}
 	if wait < 0 {
 		wait = 0
 	}
