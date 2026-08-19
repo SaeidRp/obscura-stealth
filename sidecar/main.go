@@ -38,6 +38,10 @@ const (
 	// return the interstitial (or trip the redirect limit). Tunable via
 	// SIDECAR_DEFAULT_WAIT (set 0 to disable).
 	defaultSettleWaitSeconds = 3
+	// API navigations need more time than ordinary pages. Akamai can complete the
+	// initial load while its verification and clean-URL replacement are still
+	// running, leaving a text dump with only the interstitial's noscript iframe.
+	defaultTextSettleWaitSeconds = 10
 	// Grace between the SIGKILL of a timed-out fetch and giving up on Wait, so
 	// orphaned pipe holders can't keep the call hanging.
 	killGrace = 5 * time.Second
@@ -157,18 +161,6 @@ func runFetch(ctx context.Context, req fetchRequest) (string, []json.RawMessage,
 	if timeout > maxTimeoutSeconds {
 		timeout = maxTimeoutSeconds
 	}
-	// A request that omits `wait` (the backend does) gets the default settle so
-	// JS-driven interstitials finish before we capture; a caller may override.
-	wait := req.Wait
-	if wait <= 0 {
-		wait = getenvInt("SIDECAR_DEFAULT_WAIT", defaultSettleWaitSeconds)
-	}
-	if wait < 0 {
-		wait = 0
-	}
-	if wait > maxWaitSeconds {
-		wait = maxWaitSeconds
-	}
 	waitUntil := req.WaitUntil
 	if waitUntil == "" {
 		// obscura's own default. "networkidle0" can hang indefinitely on heavy
@@ -182,6 +174,9 @@ func runFetch(ctx context.Context, req fetchRequest) (string, []json.RawMessage,
 	if dump != "text" {
 		dump = "html"
 	}
+	// A request that omits `wait` gets a dump-specific settle so JS-driven
+	// interstitials finish before capture; a caller may override it explicitly.
+	wait := resolveSettleWait(req.Wait, dump)
 
 	args := []string{
 		"fetch", req.URL,
@@ -239,6 +234,24 @@ func runFetch(ctx context.Context, req fetchRequest) (string, []json.RawMessage,
 	cookies := readCookies(filepath.Join(storageDir, "cookies.json"))
 
 	return stdout.String(), cookies, nil
+}
+
+func resolveSettleWait(requested int, dump string) int {
+	wait := requested
+	if wait <= 0 {
+		wait = getenvInt("SIDECAR_DEFAULT_WAIT", defaultSettleWaitSeconds)
+		if dump == "text" {
+			wait = getenvInt("SIDECAR_DEFAULT_TEXT_WAIT", defaultTextSettleWaitSeconds)
+		}
+	}
+	if wait < 0 {
+		return 0
+	}
+	if wait > maxWaitSeconds {
+		return maxWaitSeconds
+	}
+
+	return wait
 }
 
 // buildEnv maps per-request stealth knobs to obscura's process env so the

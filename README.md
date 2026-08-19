@@ -30,7 +30,9 @@ POST /fetch
   "cookies":    [ { "name": "…", "value": "…", "domain": "…", "path": "/" } ],
   "timezone":   "Europe/Amsterdam",                // optional, match proxy region
   "geolocation":"52.36,4.90",                      // optional
-  "timeout":    60                                  // optional, obscura nav seconds
+  "timeout":    60,                                 // optional, obscura nav seconds
+  "dump":       "html",                            // "html" or raw-body "text"
+  "wait":       8                                   // optional post-load settle seconds
 }
 → 200 { "status": 200, "html": "<…rendered…>", "cookies": [ … ] }
 → 502 { "error": "obscura fetch failed: …" }
@@ -41,6 +43,12 @@ GET /health → 200 ok
 Each request runs in an isolated process with its own `--storage-dir`, so cookies
 and concurrency are isolated. `fetch` exposes User-Agent (not arbitrary headers);
 obscura's stealth profile supplies a coherent browser header set.
+
+HTML page dumps settle for 3 seconds by default. Raw text dumps, used for JSON
+download APIs, settle for 10 seconds so Akamai's verification and clean-URL
+navigation can finish before capture. Override them with
+`SIDECAR_DEFAULT_WAIT` and `SIDECAR_DEFAULT_TEXT_WAIT`, or pass `wait` for one
+request. All waits are capped at 30 seconds.
 
 ## Image
 
