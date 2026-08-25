@@ -9,7 +9,8 @@ in the SaeidRp backend (Magnific/Freepik page fetches).
 - **Stealth is required.** Upstream's published `h4ckf0r0day/obscura` Docker Hub
   image is built **without** `--features stealth`, so `--stealth` only does
   tracker blocking — no TLS-fingerprint impersonation, and it cannot clear
-  Akamai. The upstream **release tarballs**, however, are built *with* stealth.
+  Akamai. This image uses the upstream release tarballs whose names end in
+  `-stealth`.
 - **Per-request proxy.** obscura only accepts a per-request proxy through the
   `fetch` CLI (`--proxy`); `serve`/CDP can pin just one proxy at startup. The
   backend rotates proxies per request, so this image ships a small **HTTP
@@ -53,7 +54,7 @@ request. All waits are capped at 30 seconds.
 ## Image
 
 ```
-ghcr.io/saeidrp/obscura:<upstream-version>   # e.g. v0.1.8 (lowercase — GHCR requires it)
+ghcr.io/saeidrp/obscura:<upstream-version>   # e.g. v0.2.1 (lowercase — GHCR requires it)
 ghcr.io/saeidrp/obscura:latest
 ```
 
@@ -62,8 +63,8 @@ Multi-arch: `linux/amd64` + `linux/arm64`.
 ## Build / run locally
 
 ```bash
-docker build --build-arg OBSCURA_VERSION=v0.1.8 -t ghcr.io/saeidrp/obscura:v0.1.8 .
-docker run --rm -p 9222:9222 ghcr.io/saeidrp/obscura:v0.1.8
+docker build --build-arg OBSCURA_VERSION=v0.2.1 -t ghcr.io/saeidrp/obscura:v0.2.1 .
+docker run --rm -p 9222:9222 ghcr.io/saeidrp/obscura:v0.2.1
 curl -s -XPOST localhost:9222/fetch -H 'content-type: application/json' \
   -d '{"url":"https://example.com","proxy":"http://user:pass@ip:port"}'
 ```

@@ -7,7 +7,7 @@
 # `obscura fetch --proxy <proxy> --stealth` invocation — the only way obscura
 # supports a PER-REQUEST proxy (serve/CDP can only pin one proxy at startup).
 # See README for the rationale.
-ARG OBSCURA_VERSION=v0.1.8
+ARG OBSCURA_VERSION=v0.2.1
 
 # --- download the upstream stealth release binary --------------------------
 FROM debian:bookworm-slim AS obscura
@@ -18,8 +18,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN set -eux; \
     case "$TARGETARCH" in \
-        amd64) asset="obscura-x86_64-linux.tar.gz" ;; \
-        arm64) asset="obscura-aarch64-linux.tar.gz" ;; \
+        amd64) asset="obscura-x86_64-linux-stealth.tar.gz" ;; \
+        arm64) asset="obscura-aarch64-linux-stealth.tar.gz" ;; \
         *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     curl -fsSL -o /tmp/obscura.tar.gz \
